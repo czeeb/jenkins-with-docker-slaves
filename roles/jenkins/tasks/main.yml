@@ -1,0 +1,17 @@
+---
+- name: Add Jenkins repo
+  template: src=jenkins.repo dest=/etc/yum.repos.d/jenkins.repo
+
+- name: Add Jenkins repo GPG key
+  rpm_key: state=present key=https://jenkins-ci.org/redhat/jenkins-ci.org.key
+
+- name: Install Jenkins
+  yum: name={{ item }}
+  with_items:
+    - java-1.8.0-openjdk
+    - jenkins
+
+- name: Start and Enable Jenkins
+  service: name=jenkins state=started enabled=yes
+
+

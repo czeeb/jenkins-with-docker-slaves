@@ -1,0 +1,86 @@
+# Text to prepend the name of everything
+namespace: "Jenkins with ECS Slaves"
+
+# AWS Key
+key_name: default
+
+# We want to make everything easy to teardown with a default state of present.
+state: present
+
+# AWS Region and AZ
+region: us-east-1
+availability_zone: us-east-1a
+
+# This is for demonstration purposes only.
+# A /28 gives us plenty of available IP addresses and multi-AZ is not necessary for a demo.
+vpc_cidr: 10.0.0.0/28
+vpc_subnet_cidr: 10.0.0.0/28
+
+# IAM Policies
+# Use a JSON to YAML converter like jsontoyaml.com to convert policies
+# Policies once created appear to be immutable with ansible, so any edits after creation need to be mirrored
+# by hand in the live policy
+jenkins_iam_policy:
+  Version: "2012-10-17"
+  Statement:
+    -
+      Sid: "Stmt1452746887373"
+      Action:
+        - "ecs:DescribeClusters"
+        - "ecs:RegisterTaskDefinition"
+        - "ecs:RunTask"
+        - "ecs:StopTask"
+      Effect: "Allow"
+      Resource: "{{ ecs_cluster.cluster.clusterArn }}"
+    -
+      Sid: "Stmt1452779658000"
+      Effect: "Allow"
+      Action:
+        - "ecs:ListClusters"
+      Resource:
+        - "*"
+
+jenkins_slave_iam_policy:
+  Version: "2012-10-17"
+  Statement:
+    -
+      Effect: "Allow"
+      Action:
+        - "ecs:DeregisterContainerInstance"
+        - "ecs:DiscoverPollEndpoint"
+        - "ecs:Poll"
+        - "ecs:RegisterContainerInstance"
+        - "ecs:StartTelemetrySession"
+        - "ecs:Submit*"
+        - "ecr:GetAuthorizationToken"
+        - "ecr:BatchCheckLayerAvailability"
+        - "ecr:GetDownloadUrlForLayer"
+        - "ecr:BatchGetImage"
+      #Resource: "{{ ecs_cluster.cluster.clusterArn }}"
+      Resource: "*"
+
+
+## Role variables
+role_vars:
+  jenkins:
+    ami: ami-60b6c60a  # Amazon Linux AMI 2015.09.1 (HVM), SSD Volume Type
+    instance_type: t2.micro
+    lc:
+      serial: 2015012101
+    asg:
+      min: 1
+      desired: 1
+      max: 1
+    iam_policy_document: jenkins_iam_policy
+  jenkins_slave:
+    ami: ami-2b3b6041  # amzn-ami-2015.09.d-amazon-ecs-optimized
+    instance_type: t2.micro
+    lc:
+      serial: 2015012202
+      user_data: |
+        #!/bin/bash
+        echo ECS_CLUSTER={{ ecs_cluster.cluster.clusterName }} >> /etc/ecs/ecs.config
+    asg:
+      min: 1
+      desired: 1
+      max: 1

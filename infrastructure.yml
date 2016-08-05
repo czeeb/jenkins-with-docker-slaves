@@ -1,0 +1,277 @@
+---
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+
+    #########################################################
+    # VPC Setup
+    #########################################################
+
+    - name: Create VPC
+      ec2_vpc:
+        state: "{{ state }}"
+        region: "{{ region }}"
+        cidr_block: "{{ vpc_cidr }}"
+        internet_gateway: yes
+        resource_tags:
+          "Name": "{{ namespace }}"
+      register: vpc
+      tags:
+        - vpc
+        - sg
+        - jenkins
+
+    - name: Create Subnet
+      ec2_vpc_subnet:
+        state: "{{ state }}"
+        region: "{{ region }}"
+        vpc_id: "{{ vpc.vpc_id }}"
+        cidr: "{{ vpc_subnet_cidr }}"
+        az: "{{ availability_zone }}"
+        resource_tags:
+          "Name": "{{ namespace }} subnet"
+      register: vpc_subnet
+      tags:
+        - vpc
+
+    - name: Create IGW
+      ec2_vpc_igw:
+        state: "{{ state }}"
+        region: "{{ region }}"
+        vpc_id: "{{ vpc.vpc_id }}"
+      register: igw
+      tags:
+        - vpc
+
+    - name: Create VPC Route Table
+      ec2_vpc_route_table:
+        state: "{{ state }}"
+        region: "{{ region }}"
+        vpc_id: "{{ vpc.vpc_id }}"
+        subnets:
+          - "{{ vpc_subnet.subnet.id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw.gateway_id }}"
+        resource_tags:
+          "Name": "{{ namespace }}"
+      register: route_table
+      tags:
+        - vpc
+
+    #########################################################
+    # Security Groups
+    #########################################################
+
+    - name: Create SSH Security Group
+      ec2_group:
+        name: "{{ namespace }} SSH Security Group"
+        description: "{{ namespace }} SSH Security Group to allow SSH access"
+        region: "{{ region }}"
+        vpc_id: "{{ vpc.vpc_id }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+      register: sg_ssh
+      tags:
+       - sg
+       - jenkins
+
+    - name: Create Jenkins Application Security Group
+      ec2_group:
+        name: "{{ namespace }} Jenkins Application Security Group"
+        description: "{{ namespace }} access to Jenkins"
+        region: "{{ region }}"
+        vpc_id: "{{ vpc.vpc_id }}"
+        rules:
+          - proto: tcp
+            from_port: 8080
+            to_port: 8080
+            cidr_ip: 0.0.0.0/0
+      register: sg_jenkins_app
+      tags:
+       - sg
+       - jenkins
+
+    - name: Create Jenkins Slave Security Group
+      ec2_group:
+        name: "{{ namespace }} Jenkins Slave Security Group"
+        description: "{{ namespace }} for ECS instances to be used as jenkins slaves"
+        region: "{{ region }}"
+        vpc_id: "{{ vpc.vpc_id }}"
+      register: sg_jenkins_slave
+      tags:
+        - sg
+        - jenkins
+
+    - name: Create Jenkins Security Group
+      ec2_group:
+        name: "{{ namespace }} Jenkins Security Group"
+        description: "{{ namespace }} for instances in the jenkins role"
+        region: "{{ region }}"
+        vpc_id: "{{ vpc.vpc_id }}"
+        rules:
+          # jnlp
+          - proto: tcp
+            from_port: 5000
+            to_port: 5000
+            group_id: "{{ sg_jenkins_slave.group_id }}"
+          # http
+          - proto: tcp
+            from_port: 8080
+            to_port: 8080
+            group_id: "{{ sg_jenkins_slave.group_id }}"
+      register: sg_jenkins
+      tags:
+        - sg
+        - jenkins
+
+    #########################################################
+    # ECS Cluster
+    #########################################################
+
+    - name: Create ECS Cluster
+      ecs_cluster:
+        name: "{{ namespace|replace(' ', '_') }}"
+        region: "{{ region }}"
+        state: present
+      register: ecs_cluster
+      tags:
+        - ecs
+        - iam
+        - jenkins
+
+    #########################################################
+    # IAM Policies
+    #########################################################
+
+    - name: Create IAM Role for Jenkins role
+      iam:
+        iam_type: role
+        name: "{{ namespace|replace(' ', '_') }}-jenkins"
+        state: "{{ state }}"
+      register: iam_jenkins
+      tags:
+        - jenkins
+        - iam
+
+    - name: Create IAM Role for Jenkins Slave role
+      iam:
+        iam_type: role
+        name: "{{ namespace|replace(' ', '_') }}-jenkins_slave"
+        state: "{{ state }}"
+      register: iam_jenkins_slave
+      tags:
+        - jenkins_slave
+        - iam
+
+    - name: Create IAM Policy for Jenkins role
+      iam_policy:
+        region: "{{ region }}"
+        state: "{{ state }}"
+        iam_type: role
+        iam_name: "{{ namespace|replace(' ', '_') }}-jenkins"
+        policy_name: "{{ namespace|replace(' ', '_') }}-jenkins_policy"
+        policy_json: "{{ jenkins_iam_policy|to_json }}"
+      tags:
+        - jenkins
+        - iam
+
+    - name: Create IAM Policy for Jenkins role
+      iam_policy:
+        region: "{{ region }}"
+        state: "{{ state }}"
+        iam_type: role
+        iam_name: "{{ namespace|replace(' ', '_') }}-jenkins_slave"
+        policy_name: "{{ namespace|replace(' ', '_') }}-jenkins_slave_policy"
+        policy_json: "{{ jenkins_slave_iam_policy|to_json }}"
+      tags:
+        - jenkins_slave
+        - iam
+
+    #########################################################
+    # Launch Configs
+    #########################################################
+
+    - debug: var=ecs_cluster
+
+    - name: Create Launch Config for Jenkins Servers
+      ec2_lc:
+        region: "{{ region }}"
+        state: "{{ state }}"
+        name: "{{ namespace }}-jenkins-{{ role_vars.jenkins.lc.serial }}"
+        image_id: "{{ role_vars.jenkins.ami }}"
+        key_name: "{{ key_name }}"
+        instance_profile_name: "{{ namespace|replace(' ', '_') }}-jenkins"
+        assign_public_ip: True
+        security_groups:
+          - "{{ sg_jenkins.group_id }}"
+          - "{{ sg_ssh.group_id }}"
+          - "{{ sg_jenkins_app.group_id }}"
+        instance_type: "{{ role_vars.jenkins.instance_type }}"
+      register: lc_jenkins
+      tags:
+        - jenkins
+
+    - name: Create Launch Config for Jenkins Slave Servers
+      ec2_lc:
+        region: "{{ region }}"
+        state: "{{ state }}"
+        name: "{{ namespace }}-jenkins_slave-{{ role_vars.jenkins_slave.lc.serial }}"
+        image_id: "{{ role_vars.jenkins_slave.ami }}"
+        key_name: "{{ key_name }}"
+        instance_profile_name: "{{ namespace|replace(' ', '_') }}-jenkins_slave"
+        assign_public_ip: True
+        user_data: "{{ role_vars.jenkins_slave.lc.user_data }}"
+        security_groups:
+          - "{{ sg_ssh.group_id }}"
+          - "{{ sg_jenkins_slave.group_id }}"
+        instance_type: "{{ role_vars.jenkins.instance_type }}"
+      register: lc_jenkins_slave
+      tags:
+        - jenkins_slave
+
+    #########################################################
+    # Auto Scale Groups
+    #########################################################
+
+    - name: Create Jenkins ASG
+      ec2_asg:
+        name: "{{ namespace }}-jenkins"
+        region: "{{ region }}"
+        launch_config_name: "{{ lc_jenkins.name }}"
+        min_size: "{{ role_vars.jenkins.asg.min }}"
+        desired_capacity: "{{ role_vars.jenkins.asg.desired }}"
+        max_size: "{{ role_vars.jenkins.asg.max }}"
+        vpc_zone_identifier:
+          - "{{ vpc_subnet.subnet.id }}"
+        wait_for_instances: False
+        tags:
+          - "Name": "{{ namespace }}-jenkins"
+          - "role": "jenkins"
+      register: asg_jenkins
+      tags:
+        - jenkins
+        - asg
+
+    - name: Create Jenkins Slave ASG
+      ec2_asg:
+        name: "{{ namespace }}-jenkins_slave"
+        region: "{{ region }}"
+        launch_config_name: "{{ lc_jenkins_slave.name }}"
+        min_size: "{{ role_vars.jenkins_slave.asg.min }}"
+        desired_capacity: "{{ role_vars.jenkins_slave.asg.desired }}"
+        max_size: "{{ role_vars.jenkins_slave.asg.max }}"
+        vpc_zone_identifier:
+          - "{{ vpc_subnet.subnet.id }}"
+        wait_for_instances: False
+        tags:
+          - "Name": "{{ namespace }}-jenkins_slave"
+          - "role": "jenkins_slave"
+      register: asg_jenkins_slave
+      tags:
+        - jenkins_slave
+        - asg
